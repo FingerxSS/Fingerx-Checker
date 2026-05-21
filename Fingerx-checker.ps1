@@ -1,6 +1,6 @@
 Clear-Host
 Write-Host "Fingerx Mod Analyzer" -ForegroundColor Red
-Write-Host "Enhanced Class Analyzer v3" -ForegroundColor DarkGray
+Write-Host "Sinhuini Class Analyzer" -ForegroundColor DarkGray
 Write-Host
 
 Write-Host "Enter path to the mods folder: " -NoNewline
