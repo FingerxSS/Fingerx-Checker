@@ -520,4 +520,4 @@ catch {}
 Write-Host "Scan complete." -ForegroundColor Green
 Write-Host ""
 
-pause
+Read-Host "Нажмите Enter для выхода"
