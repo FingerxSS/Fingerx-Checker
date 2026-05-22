@@ -1,6 +1,11 @@
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+$OutputEncoding           = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
 Clear-Host
-Write-Host "Fingerx Mod Analyzer" -ForegroundColor Red
-Write-Host "Sinhuini Class Analyzer" -ForegroundColor DarkGray
+Write-Host "Fingerx Mod Analyzer Ultimate" -ForegroundColor Red
+Write-Host "Sinhuini Class Analyzer - Enhanced Edition" -ForegroundColor DarkGray
 Write-Host
 
 Write-Host "Enter path to the mods folder: " -NoNewline
@@ -27,6 +32,34 @@ function Get-SHA1 {
         return $null
     }
 }
+
+
+function Get-Entropy {
+    param([string]$Text)
+
+    if (-not $Text) { return 0 }
+
+    $map = @{}
+
+    foreach ($c in $Text.ToCharArray()) {
+        if ($map.ContainsKey($c)) {
+            $map[$c]++
+        }
+        else {
+            $map[$c] = 1
+        }
+    }
+
+    $entropy = 0.0
+
+    foreach ($v in $map.Values) {
+        $p = $v / $Text.Length
+        $entropy -= $p * [Math]::Log($p, 2)
+    }
+
+    return $entropy
+}
+
 
 function Fetch-Modrinth {
     param([string]$hash)
@@ -56,6 +89,15 @@ function Fetch-Modrinth {
         Name = ""
         Slug = ""
     }
+}
+
+function Query-Megabase {
+    param([string]$Hash)
+    try {
+        $result = Invoke-RestMethod -Uri "https://megabase.vercel.app/api/query?hash=$Hash" -Method Get -UseBasicParsing -ErrorAction Stop
+        if (-not $result.error) { return $result.data }
+    } catch { }
+    return $null
 }
 
 # Высокий риск — точные паттерны с границами слов
@@ -109,9 +151,9 @@ $espPatterns = @{
 
 # Forge mappings
 $obfuscatedForge = @{
-    "func_174826_a"  = 6
-    "func_226277_ct_" = 6
-    "func_174813_aQ" = 6
+    "func_174826_a"  = 1
+    "func_226277_ct_" = 1
+    "func_174813_aQ" = 1
     "field_72338_b"  = 6
     "func_226281_cx_" = 6
     "field_72337_e"  = 6
@@ -136,23 +178,23 @@ $obfuscatedLabymod = @{
 
 # Средний риск
 $mediumRiskPatterns = @{
-    "RotationUtil"  = 5
-    "MovementUtil"  = 4
-    "PlayerUtil"    = 3
-    "RayTraceUtil"  = 5
+    "RotationUtil"  = 2
+    "MovementUtil"  = 2
+    "PlayerUtil"    = 1
+    "RayTraceUtil"  = 2
     "RenderUtil"    = 3
 }
 
 # Низкий риск
 $lowRiskPatterns = @{
-    "sendPacket"   = 2
-    "channelRead0" = 2
+    "sendPacket"   = 1
+    "channelRead0" = 1
 }
 
 # Base64 / Crypto — точные паттерны без коротких слов
 $base64Patterns = @{
-    "java/util/Base64"  = 5
-    "javax/crypto"      = 6
+    "java/util/Base64"  = 1
+    "javax/crypto"      = 1
     "SecretKeySpec"     = 5
     "SecretKey"         = 5
     "decodeBase64"      = 5
@@ -166,6 +208,108 @@ $base64Patterns = @{
     "encryptData"       = 4
     "Base64Encode"      = 4
     "Base64Decode"      = 5
+}
+
+# НОВОЕ: Расширенные паттерны читов из второго скрипта
+$suspiciousPatterns = @(
+    "AimAssist", "AnchorTweaks", "AutoAnchor", "AutoCrystal", "AutoDoubleHand",
+    "AutoHitCrystal", "AutoPot", "AutoTotem", "AutoArmor", "InventoryTotem",
+    "JumpReset", "LegitTotem", "PingSpoof", "SelfDestruct",
+    "ShieldBreaker", "TriggerBot", "AxeSpam", "WebMacro",
+    "FastPlace", "WalskyOptimizer", "WalksyOptimizer", "walsky.optimizer",
+    "WalksyCrystalOptimizerMod", "Donut", "Replace Mod",
+    "ShieldDisabler", "SilentAim", "Totem Hit", "Wtap", "FakeLag",
+    "BlockESP", "dev.krypton", "Virgin", "AntiMissClick",
+    "LagReach", "PopSwitch", "SprintReset", "ChestSteal", "AntiBot",
+    "ElytraSwap", "FastXP", "FastExp", "Refill",  "AirAnchor",
+    "jnativehook", "FakeInv", "HoverTotem", "AutoClicker", "AutoFirework",
+    "PackSpoof", "Antiknockback", "catlean", "Argon",
+    "AuthBypass", "Asteria", "Prestige", "AutoEat", "AutoMine",
+    "MaceSwap", "DoubleAnchor", "AutoTPA", "BaseFinder", "Xenon", "gypsy",
+    "Grim", "grim",
+    "org.chainlibs.module.impl.modules.Crystal.Y",
+    "org.chainlibs.module.impl.modules.Crystal.bF",
+    "org.chainlibs.module.impl.modules.Crystal.bM",
+    "org.chainlibs.module.impl.modules.Crystal.bY",
+    "org.chainlibs.module.impl.modules.Crystal.bq",
+    "org.chainlibs.module.impl.modules.Crystal.cv",
+    "org.chainlibs.module.impl.modules.Crystal.o",
+    "org.chainlibs.module.impl.modules.Blatant.I",
+    "org.chainlibs.module.impl.modules.Blatant.bR",
+    "org.chainlibs.module.impl.modules.Blatant.bx",
+    "org.chainlibs.module.impl.modules.Blatant.cj",
+    "org.chainlibs.module.impl.modules.Blatant.dk",
+    "imgui.gl3", "imgui.glfw",
+    "BowAim", "Criticals", "Fakenick", "FakeItem",
+    "invsee", "ItemExploit", "Hellion", "hellion",
+    "LicenseCheckMixin", "ClientPlayerInteractionManagerAccessor",
+    "ClientPlayerEntityMixim", "dev.gambleclient", "obfuscatedAuth",
+    "phantom-refmap.json", "xyz.greaj"
+)
+
+# НОВОЕ: Fullwidth Unicode и японские символы
+$cheatStrings = @(
+    "AutoCrystal", "autocrystal", "auto crystal", "cw crystal",
+    "dontPlaceCrystal", "dontBreakCrystal",
+    "AutoHitCrystal", "autohitcrystal", "canPlaceCrystalServer", "healPotSlot",
+    "ＡｕｔｏＣｒｙｓｔａｌ", "Ａｕｔｏ Ｃｒｙｓｔａｌ",
+    "ＡｕｔｏＨｉｔＣｒｙｓｔａｌ",
+    "AutoAnchor", "autoanchor", "auto anchor", "DoubleAnchor",
+     "HasAnchor", "anchortweaks", "anchor macro", "safe anchor", "safeanchor",
+    "SafeAnchor", "AirAnchor",
+    "ＡｕｔｏＡｎｃｈｏｒ", "Ａｕｔｏ Ａｎｃｈｏｒ",
+    "ＤｏｕｂｌｅＡｎｃｈｏｒ", "Ｄｏｕｂｌｅ Ａｎｃｈｏｒ",
+    "ＳａｆｅＡｎｃｈｏｒ", "Ｓａｆｅ Ａｎｃｈｏｒ",
+    "Ａｎｃｈｏｒ Ｍａｃｒｏ", "anchorMacro",
+    "AutoTotem", "autototem", "auto totem", "InventoryTotem",
+    "inventorytotem", "HoverTotem", "hover totem", "legittotem",
+    "ＡｕｔｏＴｏｔｅｍ", "Ａｕｔｏ Ｔｏｔｅｍ",
+    "ＨｏｖｅｒＴｏｔｅｍ", "Ｈｏｖｅｒ Ｔｏｔｅｍ",
+    "ＩｎｖｅｎｔｏｒｙＴｏｔｅｍ", "Ａｕｔｏ Ｉｎｖｅｎｔｏｒｙ Ｔｏｔｅｍ",
+    "Ａｕｔｏ Ｔｏｔｅｍ Ｈｉｔ",
+    "じ.class", "ふ.class", "ぶ.class", "ぷ.class", "た.class",
+    "ね.class", "そ.class", "な.class", "ど.class", "ぐ.class",
+    "ず.class", "で.class", "つ.class", "べ.class", "せ.class",
+    "と.class", "み.class", "び.class", "す.class", "の.class",
+    "KillAura", "ClickAura", "MultiAura", "ForceField", "LegitAura",
+    "AimBot", "AutoAim", "SilentAim", "AimLock", "HeadSnap",
+    "CrystalAura", "AnchorAura", "BedAura", "BowAimbot",
+    "ReachHack", "ExtendReach", "LongReach", "HitboxExpand",
+    "AntiKB", "NoKnockback", "GrimVelocity", "GrimDisabler",
+    "FlyHack", "CreativeFlight", "BoatFly", "PacketFly",
+    "WallHack", "XRayHack", "OreFinder", "CaveFinder",
+    "SessionStealer", "TokenLogger", "TokenGrabber", "DiscordToken",
+    "RemoteAccess", "ReverseShell", "C2Server", "Backdoor", "KeyLogger",
+    "meteordevelopment", "cc/novoline", "com/alan/clients",
+    "club/maxstats", "wtf/moonlight", "me/zeroeightsix/kami",
+    "net/ccbluex", "today/opai", "net/minecraft/injection",
+    "org/chainlibs/module/impl/modules", "xyz/greaj",
+    "doomsdayclient", "novaclient", "vape.gg", "liquidbounce",
+    "fdp-client", "rusherhack", "futureClient", "konas"
+)
+
+# НОВОЕ: Regex для fullwidth Unicode
+$fullwidthRegex = [regex]::new(
+    "[\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19]{2,}",
+    [System.Text.RegularExpressions.RegexOptions]::Compiled
+)
+
+# НОВОЕ: Паттерны для обфускаторов
+$cheatObfuscators = @{
+    "Skidfuscator"   = @("dev/skidfuscator", "Skidfuscator", "skidfuscator.dev")
+    "Paramorphism"   = @("Paramorphism", "paramorphism-", "dev/paramorphism")
+    "Radon"          = @("ItzSomebody/Radon", "me/itzsomebody/radon", "Radon Obfuscator")
+    "Caesium"        = @("sim0n/Caesium", "Caesium Obfuscator", "dev/sim0n/caesium")
+    "Bozar"          = @("vimasig/Bozar", "Bozar Obfuscator", "com/bozar")
+    "Branchlock"     = @("Branchlock", "branchlock.dev")
+    "Binscure"       = @("Binscure", "com/binscure")
+    "SuperBlaubeere" = @("superblaubeere", "superblaubeere27")
+    "Qprotect"       = @("Qprotect", "QProtect", "mdma.dev/qprotect")
+    "Zelix"          = @("ZKMFLOW", "ZKM", "ZelixKlassMaster", "com/zelix")
+    "Stringer"       = @("StringerJavaObfuscator", "com/licel/stringer")
+    "JNIC"           = @("JNIC", "jnic.obf", "jnic-obfuscator")
+    "Scuti"          = @("ScutiObf", "scuti.obf")
+    "Smoke"          = @("SmokeObf", "smoke.obf")
 }
 
 function Analyze-NestedJars {
@@ -183,6 +327,8 @@ function Analyze-NestedJars {
     $nestedFindings = @{}
     $nestedScore = 0
     $nestedObfuscated = $false
+    $nestedFullwidth = @()
+    $nestedCheatStrings = @()
 
     foreach ($nested in $nestedJars) {
 
@@ -206,14 +352,29 @@ function Analyze-NestedJars {
             if ($result.Obfuscated) {
                 $nestedObfuscated = $true
             }
+
+            # НОВОЕ: Собираем fullwidth и cheat strings из вложенных JAR
+            foreach ($fw in $result.Fullwidth) {
+                if ($nestedFullwidth -notcontains $fw) {
+                    $nestedFullwidth += $fw
+                }
+            }
+
+            foreach ($cs in $result.CheatStrings) {
+                if ($nestedCheatStrings -notcontains $cs) {
+                    $nestedCheatStrings += $cs
+                }
+            }
         }
         catch {}
     }
 
     return @{
-        Findings   = $nestedFindings
-        Score      = $nestedScore
-        Obfuscated = $nestedObfuscated
+        Findings      = $nestedFindings
+        Score         = $nestedScore
+        Obfuscated    = $nestedObfuscated
+        Fullwidth     = $nestedFullwidth
+        CheatStrings  = $nestedCheatStrings
     }
 }
 
@@ -223,6 +384,8 @@ function Analyze-ClassFiles {
     $findings = @{}
     $score = 0
     $obfuscationDetected = $false
+    $foundFullwidth = @()
+    $foundCheatStrings = @()
 
     $classFiles = Get-ChildItem `
         -Path $extractPath `
@@ -232,12 +395,46 @@ function Analyze-ClassFiles {
 
     foreach ($class in $classFiles) {
         try {
-            $bytes = [System.IO.File]::ReadAllBytes($class.FullName)
+            
+            $stream = [System.IO.File]::OpenRead($class.FullName)
+            $buffer = New-Object byte[] 65536
+            $read = $stream.Read($buffer, 0, $buffer.Length)
+            $stream.Close()
+
+            $bytes = $buffer[0..($read-1)]
+
 
             # FIX: Latin1 вместо ASCII — читает байты 1:1 без потерь
             $text = [System.Text.Encoding]::Latin1.GetString($bytes)
+            $utf8 = [System.Text.Encoding]::UTF8.GetString($bytes)
 
-            # High risk
+            
+            # URL extraction
+            $urlRegex = '(https?:\/\/[^\s"]+)'
+            $urlMatches = [regex]::Matches($text, $urlRegex)
+
+            foreach ($u in $urlMatches) {
+                $url = $u.Value
+
+                if ($url -match "discord|webhook|pastebin|ngrok") {
+                    if (-not $findings.ContainsKey("SuspiciousURL")) {
+                        $findings["SuspiciousURL"] = 12
+                        $score += 12
+                    }
+                }
+            }
+
+            # Entropy detection
+            $entropy = Get-Entropy $text
+
+            if ($entropy -gt 7.2) {
+                if (-not $findings.ContainsKey("HighEntropy")) {
+                    $findings["HighEntropy"] = 8
+                    $score += 8
+                }
+            }
+
+# High risk
             foreach ($pattern in $highRiskPatterns.Keys) {
                 if ($text -match [regex]::Escape($pattern)) {
                     if (-not $findings.ContainsKey($pattern)) {
@@ -254,6 +451,36 @@ function Analyze-ClassFiles {
                         $findings[$pattern] = $espPatterns[$pattern]
                         $score += $espPatterns[$pattern]
                     }
+                }
+            }
+
+            # НОВОЕ: Дополнительные suspicious паттерны
+            foreach ($pattern in $suspiciousPatterns) {
+                if ($text -match [regex]::Escape($pattern)) {
+                    if (-not $findings.ContainsKey($pattern)) {
+                        $findings[$pattern] = 8
+                        $score += 8
+                    }
+                }
+            }
+
+            # НОВОЕ: Cheat strings с fullwidth
+            foreach ($cs in $cheatStrings) {
+                if ($text.Contains($cs) -or $utf8.Contains($cs)) {
+                    if ($foundCheatStrings -notcontains $cs) {
+                        $foundCheatStrings += $cs
+                        $score += 7
+                    }
+                }
+            }
+
+            # НОВОЕ: Fullwidth Unicode детекция
+            $fwMatches = $fullwidthRegex.Matches($utf8)
+            foreach ($m in $fwMatches) {
+                $fw = $m.Value
+                if ($foundFullwidth -notcontains $fw) {
+                    $foundFullwidth += $fw
+                    $score += 8
                 }
             }
 
@@ -323,7 +550,6 @@ function Analyze-ClassFiles {
             # Поиск встроенных Base64 строк
             $b64Regex = '(?:[A-Za-z0-9+/]{4}){20,}(?:==|=)?'
 
-            # FIX: переименовано из $matches в $b64Matches — $matches зарезервирована в PS
             $b64Matches = [regex]::Matches($text, $b64Regex)
 
             foreach ($b64Match in $b64Matches) {
@@ -337,14 +563,256 @@ function Analyze-ClassFiles {
                 }
                 catch {}
             }
+
+            # НОВОЕ: Детекция известных обфускаторов
+            foreach ($obfName in $cheatObfuscators.Keys) {
+                foreach ($pat in $cheatObfuscators[$obfName]) {
+                    if ($text.Contains($pat)) {
+                        $findings["CheatObfuscator:$obfName"] = 10
+                        $score += 10
+                        $obfuscationDetected = $true
+                        break
+                    }
+                }
+            }
         }
         catch {}
     }
 
     return @{
-        Findings   = $findings
-        Score      = $score
-        Obfuscated = $obfuscationDetected
+        Findings      = $findings
+        Score         = $score
+        Obfuscated    = $obfuscationDetected
+        Fullwidth     = $foundFullwidth
+        CheatStrings  = $foundCheatStrings
+    }
+}
+
+# НОВОЕ: Функция для анализа bypass/injection техник
+function Analyze-BypassTechniques {
+    param([string]$FilePath)
+
+    $bypassFlags = @()
+    $bypassScore = 0
+
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($FilePath)
+
+        $nestedJars   = @($zip.Entries | Where-Object { $_.FullName -match "^META-INF/jars/.+\.jar$" })
+        $outerClasses = @($zip.Entries | Where-Object { $_.FullName -match "\.class$" })
+
+        # Детекция hollow shell
+        if ($nestedJars.Count -eq 1 -and $outerClasses.Count -lt 3) {
+            $bypassFlags += "HollowShell"
+            $bypassScore += 12
+        }
+
+        # Детекция подозрительных вложенных JAR
+        foreach ($nj in $nestedJars) {
+            $njName = [System.IO.Path]::GetFileName($nj.FullName)
+            if ($njName -notmatch '\d' -and $njName.Length -lt 20) {
+                $bypassFlags += "SuspiciousNestedJAR:$njName"
+                $bypassScore += 8
+            }
+        }
+
+        $allEntries = [System.Collections.Generic.List[object]]::new()
+        foreach ($e in $zip.Entries) { $allEntries.Add($e) }
+
+        # Анализ вложенных JAR
+        $innerZips = [System.Collections.Generic.List[object]]::new()
+        foreach ($nj in $nestedJars) {
+            try {
+                $ns = $nj.Open()
+                $ms = New-Object System.IO.MemoryStream
+                $ns.CopyTo($ms); $ns.Close()
+                $ms.Position = 0
+                $iz = [System.IO.Compression.ZipArchive]::new($ms, [System.IO.Compression.ZipArchiveMode]::Read)
+                $innerZips.Add($iz)
+                foreach ($ie in $iz.Entries) { $allEntries.Add($ie) }
+            } catch { }
+        }
+
+        $runtimeExecFound  = $false
+        $httpDownloadFound = $false
+        $httpExfilFound    = $false
+
+        foreach ($entry in $allEntries) {
+            if ($entry.FullName -match "\.class$") {
+                try {
+                    $st = $entry.Open()
+                    $ms2 = New-Object System.IO.MemoryStream
+                    $st.CopyTo($ms2)
+                    $st.Close()
+                    $rawBytes = $ms2.ToArray()
+                    $ms2.Dispose()
+                    $ct = [System.Text.Encoding]::ASCII.GetString($rawBytes)
+
+                    if ($ct -match "java/lang/Runtime" -and $ct -match "getRuntime" -and $ct -match "exec") {
+                        $runtimeExecFound = $true
+                    }
+
+                    if ($ct -match "openConnection" -and $ct -match "HttpURLConnection" -and $ct -match "FileOutputStream") {
+                        $httpDownloadFound = $true
+                    }
+
+                    if ($ct -match "openConnection" -and $ct -match "setDoOutput" -and $ct -match "getOutputStream") {
+                        $httpExfilFound = $true
+                    }
+                } catch { }
+            }
+        }
+
+        foreach ($iz in $innerZips) { try { $iz.Dispose() } catch { } }
+        $zip.Dispose()
+
+        if ($runtimeExecFound) {
+            $bypassFlags += "Runtime.exec()"
+            $bypassScore += 15
+        }
+        if ($httpDownloadFound) {
+            $bypassFlags += "HTTPDownload"
+            $bypassScore += 12
+        }
+        if ($httpExfilFound) {
+            $bypassFlags += "HTTPExfiltration"
+            $bypassScore += 15
+        }
+
+    } catch { }
+
+    return @{
+        Flags = $bypassFlags
+        Score = $bypassScore
+    }
+}
+
+# НОВОЕ: Функция для анализа обфускации
+function Analyze-ObfuscationLevel {
+    param([string]$FilePath)
+
+    $obfFlags = @()
+    $obfScore = 0
+
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($FilePath)
+
+        $totalClass    = 0
+        $numericCount  = 0
+        $unicodeCount  = 0
+        $fullwidthCount= 0
+        $japaneseCount = 0
+        $singleLetterCount = 0
+
+        foreach ($entry in $archive.Entries) {
+            if ($entry.FullName -match "\.class$") {
+                $totalClass++
+                $className = [System.IO.Path]::GetFileNameWithoutExtension(($entry.FullName -split "/")[-1])
+
+                if ($className -match "^\d+$") { $numericCount++ }
+                if ($className -match "[^\x00-\x7F]") { $unicodeCount++ }
+                if ($className -match "[\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19]") { $fullwidthCount++ }
+                if ($className -match "[\u3040-\u309F\u30A0-\u30FF]") { $japaneseCount++ }
+                if ($className -match "^[a-zA-Z]$") { $singleLetterCount++ }
+            }
+        }
+
+        $archive.Dispose()
+
+        if ($totalClass -ge 5) {
+            $numPct = [math]::Round(($numericCount / $totalClass) * 100)
+            $uniPct = [math]::Round(($unicodeCount / $totalClass) * 100)
+            $fwPct  = [math]::Round(($fullwidthCount / $totalClass) * 100)
+            $jpPct  = [math]::Round(($japaneseCount / $totalClass) * 100)
+            $s1Pct  = [math]::Round(($singleLetterCount / $totalClass) * 100)
+
+            if ($numPct -ge 20) { 
+                $obfFlags += "NumericClasses:$numPct%"
+                $obfScore += 8
+            }
+            if ($uniPct -ge 10) { 
+                $obfFlags += "UnicodeClasses:$uniPct%"
+                $obfScore += 7
+            }
+            if ($fwPct -gt 0) { 
+                $obfFlags += "FullwidthClasses:$fwPct%"
+                $obfScore += 10
+            }
+            if ($jpPct -gt 0) { 
+                $obfFlags += "JapaneseClasses:$jpPct%"
+                $obfScore += 10
+            }
+            if ($s1Pct -ge 15) { 
+                $obfFlags += "SingleLetterClasses:$s1Pct%"
+                $obfScore += 6
+            }
+        }
+
+    } catch { }
+
+    return @{
+        Flags = $obfFlags
+        Score = $obfScore
+    }
+}
+
+# НОВОЕ: Функция для сканирования JVM
+function Invoke-JvmScan {
+    $jvmFlags = @()
+    $jvmScore = 0
+
+    $javaProc = Get-Process javaw -ErrorAction SilentlyContinue
+    if (-not $javaProc) { $javaProc = Get-Process java -ErrorAction SilentlyContinue }
+    if (-not $javaProc) { return @{ Flags = $jvmFlags; Score = $jvmScore } }
+
+    $javaPid = ($javaProc | Select-Object -First 1).Id
+
+    try {
+        $wmi = Get-WmiObject Win32_Process -Filter "ProcessId = $javaPid" -ErrorAction Stop
+        $cmdLine = $wmi.CommandLine
+
+        if ($cmdLine) {
+            # Детекция Java Agents
+            $agentMatches = [regex]::Matches($cmdLine, '-javaagent:([^\s"]+)')
+            foreach ($m in $agentMatches) {
+                $agentPath = $m.Groups[1].Value.Trim('"').Trim("'")
+                $agentName = [System.IO.Path]::GetFileName($agentPath)
+                
+                $legitAgents = @("jmxremote","yjp","jrebel","newrelic","jacoco","theseus")
+                $isLegit = $false
+                foreach ($la in $legitAgents) { 
+                    if ($agentName -match $la) { $isLegit = $true; break } 
+                }
+                
+                if (-not $isLegit) {
+                    $jvmFlags += "JavaAgent:$agentName"
+                    $jvmScore += 12
+                }
+            }
+
+            # Детекция опасных JVM флагов
+            if ($cmdLine -match "-Xbootclasspath/p:") {
+                $jvmFlags += "BootClasspathPrepend"
+                $jvmScore += 10
+            }
+            if ($cmdLine -match "-Xbootclasspath/a:") {
+                $jvmFlags += "BootClasspathAppend"
+                $jvmScore += 10
+            }
+            if ($cmdLine -match "-agentlib:jdwp") {
+                $jvmFlags += "JDWPDebugAgent"
+                $jvmScore += 8
+            }
+            if ($cmdLine -match "-agentpath:") {
+                $jvmFlags += "NativeAgent"
+                $jvmScore += 12
+            }
+        }
+    } catch { }
+
+    return @{
+        Flags = $jvmFlags
+        Score = $jvmScore
     }
 }
 
@@ -381,6 +849,16 @@ function Analyze-Metadata {
                     }
                 }
             }
+
+            # НОВОЕ: Проверка suspicious паттернов в метаданных
+            foreach ($pattern in $suspiciousPatterns) {
+                if ($content -match [regex]::Escape($pattern)) {
+                    if (-not $findings.ContainsKey($pattern)) {
+                        $findings[$pattern] = 7
+                        $score += 7
+                    }
+                }
+            }
         }
         catch {}
     }
@@ -413,6 +891,7 @@ $verifiedMods   = @()
 $unknownMods    = @()
 $suspiciousMods = @()
 $highRiskMods   = @()
+$criticalMods   = @() # НОВОЕ: Критические моды с bypass/injection
 
 $tempDir = Join-Path $env:TEMP "fingerx_analyzer"
 
@@ -432,25 +911,63 @@ $jarFiles = Get-ChildItem `
 $total = $jarFiles.Count
 $index = 0
 
-foreach ($jar in $jarFiles) {
+Write-Host ""
+Write-Host "=== PHASE 1: Hash Verification (Modrinth + Megabase) ===" -ForegroundColor Cyan
+Write-Host ""
 
+foreach ($jar in $jarFiles) {
     $index++
 
     Write-Host ("`r" + (" " * 120)) -NoNewline
-    Write-Host "`r[$index/$total] Scanning $($jar.Name)..." `
+    Write-Host "`r[$index/$total] Verifying $($jar.Name)..." `
         -ForegroundColor Yellow `
         -NoNewline
 
     $hash = Get-SHA1 $jar.FullName
-    $modrinth = Fetch-Modrinth $hash
-
-    if ($modrinth.Slug) {
-        $verifiedMods += [PSCustomObject]@{
-            ModName  = $modrinth.Name
-            FileName = $jar.Name
+    
+    if ($hash) {
+        $modrinth = Fetch-Modrinth $hash
+        if ($modrinth.Slug) {
+            $verifiedMods += [PSCustomObject]@{
+                ModName  = $modrinth.Name
+                FileName = $jar.Name
+            }
+            continue
         }
+
+        # НОВОЕ: Проверка в Megabase
+        $megabase = Query-Megabase $hash
+        if ($megabase.name) {
+            $verifiedMods += [PSCustomObject]@{
+                ModName  = $megabase.name
+                FileName = $jar.Name
+            }
+            continue
+        }
+    }
+
+    # Мод не верифицирован, переходим к глубокому анализу
+}
+
+Write-Host ("`r" + (" " * 120))
+Write-Host ""
+Write-Host "=== PHASE 2: Deep Pattern Analysis ===" -ForegroundColor Cyan
+Write-Host ""
+
+$index = 0
+
+foreach ($jar in $jarFiles) {
+    $index++
+
+    # Пропускаем уже верифицированные
+    if ($verifiedMods | Where-Object { $_.FileName -eq $jar.Name }) {
         continue
     }
+
+    Write-Host ("`r" + (" " * 120)) -NoNewline
+    Write-Host "`r[$index/$total] Deep scanning $($jar.Name)..." `
+        -ForegroundColor Yellow `
+        -NoNewline
 
     $extractPath = Join-Path $tempDir ([System.IO.Path]::GetFileNameWithoutExtension($jar.Name))
 
@@ -464,6 +981,10 @@ foreach ($jar in $jarFiles) {
         $metaResult   = Analyze-Metadata $extractPath
         $nestedResult = Analyze-NestedJars $extractPath $tempDir
 
+        # НОВОЕ: Bypass и обфускация анализ
+        $bypassResult = Analyze-BypassTechniques $jar.FullName
+        $obfResult    = Analyze-ObfuscationLevel $jar.FullName
+
         $allFindings = @{}
 
         foreach ($key in $classResult.Findings.Keys) {
@@ -474,15 +995,28 @@ foreach ($jar in $jarFiles) {
                 $allFindings[$key] = $metaResult.Findings[$key]
             }
         }
-        # FIX: добавляем находки из вложенных .jar
         foreach ($key in $nestedResult.Findings.Keys) {
             if (-not $allFindings.ContainsKey($key)) {
                 $allFindings[$key] = $nestedResult.Findings[$key]
             }
         }
 
-        $totalScore = $classResult.Score + $metaResult.Score + $nestedResult.Score
+        $totalScore = $classResult.Score + $metaResult.Score + $nestedResult.Score + 
+                      $bypassResult.Score + $obfResult.Score
+        
         $isObfuscated = $classResult.Obfuscated -or $nestedResult.Obfuscated
+
+        # Собираем все fullwidth находки
+        $allFullwidth = @()
+        $allFullwidth += $classResult.Fullwidth
+        $allFullwidth += $nestedResult.Fullwidth
+        $allFullwidth = $allFullwidth | Select-Object -Unique
+
+        # Собираем cheat strings
+        $allCheatStrings = @()
+        $allCheatStrings += $classResult.CheatStrings
+        $allCheatStrings += $nestedResult.CheatStrings
+        $allCheatStrings = $allCheatStrings | Select-Object -Unique
 
         # Base64 + Obfuscation бонус
         if ($allFindings.ContainsKey("EmbeddedBase64") -and $isObfuscated) {
@@ -494,12 +1028,28 @@ foreach ($jar in $jarFiles) {
             $totalScore += 5
         }
 
-        if ($totalScore -ge 15) {
+        # НОВОЕ: Критические моды (bypass/injection)
+        if ($bypassResult.Flags.Count -gt 0 -or $totalScore -ge 30) {
+            $criticalMods += [PSCustomObject]@{
+                FileName       = $jar.Name
+                Detections     = ($allFindings.Keys | Sort-Object { $allFindings[$_] } -Descending) -join ", "
+                Score          = $totalScore
+                Obfuscated     = $isObfuscated
+                BypassFlags    = $bypassResult.Flags -join ", "
+                ObfuscationFlags = $obfResult.Flags -join ", "
+                Fullwidth      = $allFullwidth -join ", "
+                CheatStrings   = $allCheatStrings -join ", "
+            }
+        }
+        elseif ($totalScore -ge 15) {
             $highRiskMods += [PSCustomObject]@{
-                FileName   = $jar.Name
-                Detections = ($allFindings.Keys | Sort-Object { $allFindings[$_] } -Descending) -join ", "
-                Score      = $totalScore
-                Obfuscated = $isObfuscated
+                FileName       = $jar.Name
+                Detections     = ($allFindings.Keys | Sort-Object { $allFindings[$_] } -Descending) -join ", "
+                Score          = $totalScore
+                Obfuscated     = $isObfuscated
+                ObfuscationFlags = $obfResult.Flags -join ", "
+                Fullwidth      = $allFullwidth -join ", "
+                CheatStrings   = $allCheatStrings -join ", "
             }
         }
         elseif ($totalScore -ge 5) {
@@ -508,6 +1058,7 @@ foreach ($jar in $jarFiles) {
                 Detections = ($allFindings.Keys | Sort-Object { $allFindings[$_] } -Descending) -join ", "
                 Score      = $totalScore
                 Obfuscated = $isObfuscated
+                Fullwidth  = $allFullwidth -join ", "
             }
         }
         else {
@@ -525,6 +1076,15 @@ foreach ($jar in $jarFiles) {
 
 Write-Host ("`r" + (" " * 120))
 Write-Host ""
+Write-Host "=== PHASE 3: JVM Runtime Analysis ===" -ForegroundColor Magenta
+Write-Host ""
+
+$jvmResult = Invoke-JvmScan
+
+Write-Host ("`r" + (" " * 120))
+Write-Host ""
+
+# ==================== OUTPUT ====================
 
 if ($verifiedMods.Count -gt 0) {
     Write-Host "{ VERIFIED MODS }" -ForegroundColor DarkCyan
@@ -564,6 +1124,10 @@ if ($suspiciousMods.Count -gt 0) {
             Write-Host "  [!] Obfuscated code detected" -ForegroundColor Red
         }
 
+        if ($mod.Fullwidth) {
+            Write-Host "  [!] Fullwidth Unicode: $($mod.Fullwidth)" -ForegroundColor Cyan
+        }
+
         Write-Host ""
     }
 }
@@ -580,8 +1144,65 @@ if ($highRiskMods.Count -gt 0) {
             Write-Host "  [!] OBFUSCATED CODE DETECTED" -ForegroundColor Red
         }
 
+        if ($mod.ObfuscationFlags) {
+            Write-Host "  [!] Obfuscation: $($mod.ObfuscationFlags)" -ForegroundColor Yellow
+        }
+
+        if ($mod.Fullwidth) {
+            Write-Host "  [!] Fullwidth Unicode: $($mod.Fullwidth)" -ForegroundColor Cyan
+        }
+
+        if ($mod.CheatStrings) {
+            Write-Host "  [!] Cheat Strings: $($mod.CheatStrings)" -ForegroundColor Magenta
+        }
+
         Write-Host ""
     }
+}
+
+# НОВОЕ: Критические моды с bypass
+if ($criticalMods.Count -gt 0) {
+    Write-Host "{ ⚠️  CRITICAL - BYPASS/INJECTION DETECTED ⚠️ }" -ForegroundColor White -BackgroundColor Red
+
+    foreach ($mod in $criticalMods) {
+        Write-Host "> $($mod.FileName)" -ForegroundColor Red -BackgroundColor Black
+        Write-Host "  Detections: $($mod.Detections)" -ForegroundColor Magenta
+        Write-Host "  Risk Score: $($mod.Score)" -ForegroundColor Magenta
+
+        if ($mod.BypassFlags) {
+            Write-Host "  [!!!] BYPASS TECHNIQUES: $($mod.BypassFlags)" -ForegroundColor Red -BackgroundColor Yellow
+        }
+
+        if ($mod.Obfuscated) {
+            Write-Host "  [!] OBFUSCATED CODE DETECTED" -ForegroundColor Red
+        }
+
+        if ($mod.ObfuscationFlags) {
+            Write-Host "  [!] Obfuscation: $($mod.ObfuscationFlags)" -ForegroundColor Yellow
+        }
+
+        if ($mod.Fullwidth) {
+            Write-Host "  [!] Fullwidth Unicode: $($mod.Fullwidth)" -ForegroundColor Cyan
+        }
+
+        if ($mod.CheatStrings) {
+            Write-Host "  [!] Cheat Strings: $($mod.CheatStrings)" -ForegroundColor Magenta
+        }
+
+        Write-Host ""
+    }
+}
+
+# НОВОЕ: JVM инъекции
+if ($jvmResult.Flags.Count -gt 0) {
+    Write-Host "{ ⚠️  JVM RUNTIME INJECTION DETECTED ⚠️ }" -ForegroundColor White -BackgroundColor DarkRed
+
+    foreach ($flag in $jvmResult.Flags) {
+        Write-Host "  [!!!] $flag" -ForegroundColor Red
+    }
+    
+    Write-Host "  JVM Risk Score: $($jvmResult.Score)" -ForegroundColor Magenta
+    Write-Host ""
 }
 
 try {
@@ -589,7 +1210,20 @@ try {
 }
 catch {}
 
-Write-Host "Scan complete." -ForegroundColor Green
+Write-Host "====================================" -ForegroundColor Cyan
+Write-Host "SCAN SUMMARY" -ForegroundColor White
+Write-Host "====================================" -ForegroundColor Cyan
+Write-Host "Total Scanned:  $total" -ForegroundColor Gray
+Write-Host "Verified:       $($verifiedMods.Count)" -ForegroundColor Green
+Write-Host "Unknown:        $($unknownMods.Count)" -ForegroundColor Gray
+Write-Host "Suspicious:     $($suspiciousMods.Count)" -ForegroundColor Yellow
+Write-Host "High Risk:      $($highRiskMods.Count)" -ForegroundColor Red
+Write-Host "CRITICAL:       $($criticalMods.Count)" -ForegroundColor Red -BackgroundColor Black
+if ($jvmResult.Flags.Count -gt 0) {
+    Write-Host "JVM Injections: $($jvmResult.Flags.Count)" -ForegroundColor Red -BackgroundColor DarkRed
+}
+Write-Host "====================================" -ForegroundColor Cyan
 Write-Host ""
+Write-Host "Scan complete. Press Enter to exit." -ForegroundColor Green
 
-Read-Host "Нажмите Enter для выхода"
+Read-Host
