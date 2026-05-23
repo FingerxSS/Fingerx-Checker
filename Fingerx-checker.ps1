@@ -1180,7 +1180,13 @@ foreach ($jar in $jarFiles) {
         }
 
         # Categorize mod
-        if ($bypassResult.Flags.Count -gt 0 -or $totalScore -ge 35) {
+        ```powershell
+if (
+    $totalScore -ge 35 -or
+    $bypassResult.Score -ge 15
+)
+```
+ {
             $criticalMods += [PSCustomObject]@{
                 FileName = $jar.Name
                 Detections = ($allFindings.Keys | Sort-Object { $allFindings[$_] } -Descending | Select-Object -First 10) -join ', '
