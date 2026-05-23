@@ -604,7 +604,7 @@ function Analyze-ClassFiles {
                 -Features ([ref]$features)
         }
         catch {
-            Write-Host "`n[!] Error analyzing class: $($class.Name)" -ForegroundColor Red
+            # Silently skip unreadable class files
         }
     }
 
