@@ -897,9 +897,17 @@ function Analyze-BypassTechniques {
             $bypassFlags += 'ProcessBuilder'
             $bypassScore += 15
         }
-        if ($nativeLoad) {
-            $bypassFlags += 'NativeLibraryLoad'
-            $bypassScore += 12
+       $isLegitNative = $false
+
+       foreach ($pattern in $LegitNativePatterns) {
+         if ($classText -match $pattern) {
+           $isLegitNative = $true
+           break
+           }
+        }
+        if ($nativeLoad -and -not $isLegitNative) {
+           $bypassFlags += 'NativeLibraryLoad'
+           $bypassScore += 3 }
         }
         if ($httpDownload) {
             $bypassFlags += 'HTTPDownload'
