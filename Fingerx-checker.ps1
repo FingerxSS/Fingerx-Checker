@@ -1348,6 +1348,97 @@ function Analyze-NativePayloadExtraction {
     return @{ Flags = $flags; Score = $score; Payloads = $payloads }
 }
 
+
+function Analyze-PackedLoaderDetection {
+    param([string]$extractPath)
+
+    # Detects obfuscated packed loaders like: tiny class names, custom ClassLoader,
+    # defineClass from embedded byte arrays/resources, reflection main invoke, raw socket fallback.
+    $flags = @()
+    $findings = @{}
+    $score = 0
+    $stats = @{
+        ClassLoaderHits = 0
+        DefineClassHits = 0
+        FindLoadedClassHits = 0
+        ReflectionInvokeHits = 0
+        ResourceStreamHits = 0
+        DataInputHits = 0
+        EmbeddedClassMapHits = 0
+        RawSocketHits = 0
+        DirectIPHits = 0
+        DirectByteBufferHits = 0
+        ByteWipeHits = 0
+        TinyClassNameHits = 0
+        DecompressorLikeHits = 0
+        LoaderEntrypointHits = 0
+    }
+
+    $classes = Get-ChildItem -Path $extractPath -Recurse -Filter *.class -ErrorAction SilentlyContinue
+    foreach ($class in $classes) {
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($class.FullName)
+            if ($bytes.Length -gt $Config.MaxFileSize) { continue }
+            $latin1Text = Convert-BytesToAsciiText $bytes
+            $utf8Text = [System.Text.Encoding]::UTF8.GetString($bytes)
+            $className = [System.IO.Path]::GetFileNameWithoutExtension($class.Name)
+
+            if ($className -match '^[a-zA-Z0-9]{1,2}$') { $stats.TinyClassNameHits++ }
+
+            if ($latin1Text -match 'java/lang/ClassLoader|ClassLoader') { $stats.ClassLoaderHits++ }
+            if ($latin1Text -match 'defineClass') { $stats.DefineClassHits++ }
+            if ($latin1Text -match 'findLoadedClass') { $stats.FindLoadedClassHits++ }
+            if (($latin1Text -match 'java/lang/reflect/Method|reflect/Method|getDeclaredMethod') -and $latin1Text -match 'invoke') { $stats.ReflectionInvokeHits++ }
+            if ($latin1Text -match 'getResourceAsStream') { $stats.ResourceStreamHits++ }
+            if ($latin1Text -match 'ByteArrayInputStream|DataInputStream|readUTF|readFully') { $stats.DataInputHits++ }
+            if ($latin1Text -match 'HashMap|Map' -and $latin1Text -match 'readUTF' -and $latin1Text -match 'readInt' -and $latin1Text -match 'readFully') { $stats.EmbeddedClassMapHits++ }
+            if ($latin1Text -match 'java/nio/channels/SocketChannel|SocketChannel' -and $latin1Text -match 'InetSocketAddress|InetAddress' -and $latin1Text -match 'connect') { $stats.RawSocketHits++ }
+            if ($latin1Text -match 'InetAddress|getByAddress') { $stats.DirectIPHits++ }
+            if ($latin1Text -match 'ByteBuffer|allocateDirect') { $stats.DirectByteBufferHits++ }
+            if ($latin1Text -match 'Arrays/fill|fill' -or ($latin1Text -match 'put\(new byte' -or $utf8Text -match 'put\(new byte')) { $stats.ByteWipeHits++ }
+
+            # LZMA/range-decoder style decompressor indicators: short probability arrays + 0xFF000000 normalization + 1024 init.
+            if (($latin1Text -match '\[S|short') -and ($latin1Text -match '1024' -or $latin1Text -match '2048') -and ($latin1Text -match 'FF000000|16777216')) {
+                $stats.DecompressorLikeHits++
+            }
+
+            if (($latin1Text -match 'defineClass') -and ($latin1Text -match 'getDeclaredMethod') -and ($latin1Text -match 'main') -and ($latin1Text -match 'invoke')) {
+                $stats.LoaderEntrypointHits++
+            }
+        }
+        catch {}
+    }
+
+    if ($stats.ClassLoaderHits -gt 0) { $flags += "CustomClassLoader:$($stats.ClassLoaderHits)"; $score += 10; $findings['CustomClassLoader'] = 10 }
+    if ($stats.DefineClassHits -gt 0) { $flags += "DefineClassLoader:$($stats.DefineClassHits)"; $score += 15; $findings['DefineClassLoader'] = 15 }
+    if ($stats.FindLoadedClassHits -gt 0) { $flags += "FindLoadedClass:$($stats.FindLoadedClassHits)"; $score += 6; $findings['FindLoadedClass'] = 6 }
+    if ($stats.ReflectionInvokeHits -gt 0) { $flags += "ReflectiveInvoke:$($stats.ReflectionInvokeHits)"; $score += 12; $findings['ReflectiveInvoke'] = 12 }
+    if ($stats.ResourceStreamHits -gt 0 -and $stats.DataInputHits -gt 0) { $flags += 'EmbeddedResourcePayload'; $score += 14; $findings['EmbeddedResourcePayload'] = 14 }
+    if ($stats.EmbeddedClassMapHits -gt 0 -and $stats.DefineClassHits -gt 0) { $flags += 'EmbeddedClassMapLoader'; $score += 35; $findings['EmbeddedClassMapLoader'] = 35 }
+    if ($stats.LoaderEntrypointHits -gt 0) { $flags += 'ReflectiveClassLoaderEntrypoint'; $score += 35; $findings['ReflectiveClassLoaderEntrypoint'] = 35 }
+    if ($stats.RawSocketHits -gt 0) { $flags += "RawSocketPayloadLoader:$($stats.RawSocketHits)"; $score += 35; $findings['RawSocketPayloadLoader'] = 35 }
+    if ($stats.DirectIPHits -gt 0 -and $stats.RawSocketHits -gt 0) { $flags += 'DirectIPSocketFallback'; $score += 15; $findings['DirectIPSocketFallback'] = 15 }
+    if ($stats.DirectByteBufferHits -gt 0 -and $stats.RawSocketHits -gt 0) { $flags += 'DirectByteBufferNetworkIO'; $score += 10; $findings['DirectByteBufferNetworkIO'] = 10 }
+    if ($stats.ByteWipeHits -gt 0) { $flags += "MemoryWipeBehavior:$($stats.ByteWipeHits)"; $score += 6; $findings['MemoryWipeBehavior'] = 6 }
+    if ($stats.TinyClassNameHits -ge 2) { $flags += "TinyClassNames:$($stats.TinyClassNameHits)"; $score += 6; $findings['TinyClassNames'] = 6 }
+    if ($stats.DecompressorLikeHits -gt 0) { $flags += "PackedDecompressorLike:$($stats.DecompressorLikeHits)"; $score += 12; $findings['PackedDecompressorLike'] = 12 }
+
+    # Correlation rules: these are intentionally high-confidence for packed malware/cheat loaders.
+    if ($stats.DefineClassHits -gt 0 -and $stats.ReflectionInvokeHits -gt 0 -and $stats.EmbeddedClassMapHits -gt 0) {
+        $flags += 'PackedReflectiveLoaderCorrelation'
+        $score += 30
+        $findings['PackedReflectiveLoaderCorrelation'] = 30
+    }
+
+    if ($stats.RawSocketHits -gt 0 -and $stats.DecompressorLikeHits -gt 0) {
+        $flags += 'RemotePackedPayloadCorrelation'
+        $score += 25
+        $findings['RemotePackedPayloadCorrelation'] = 25
+    }
+
+    return @{ Flags = $flags; Score = $score; Stats = $stats; Findings = $findings }
+}
+
 function Invoke-DynamicRuntimeSandbox {
     param(
         [string]$FilePath,
@@ -1426,6 +1517,7 @@ function Calculate-ProperHeuristicScore {
         [hashtable]$AsmResult,
         [hashtable]$MixinResult,
         [hashtable]$ReflectionResult,
+        [hashtable]$PackedLoaderResult,
         [hashtable]$NativeResult,
         [hashtable]$SandboxResult
     )
@@ -1436,6 +1528,7 @@ function Calculate-ProperHeuristicScore {
     $score += $AsmResult.Score
     $score += $MixinResult.Score
     $score += $ReflectionResult.Score
+    $score += $PackedLoaderResult.Score
     $score += $NativeResult.Score
     $score += $SandboxResult.Score
 
@@ -1450,6 +1543,14 @@ function Calculate-ProperHeuristicScore {
     if ($ReflectionResult.Stats.DefineClass -gt 0 -and $ClassFeatures.Base64Strings -gt 0) {
         $score *= 1.20
         $reasons += 'Base64+DefineClassMultiplier'
+    }
+    if ($PackedLoaderResult.Score -ge 35) {
+        $score *= 1.30
+        $reasons += 'PackedLoaderMultiplier'
+    }
+    if ($PackedLoaderResult.Stats.RawSocketHits -gt 0 -and $PackedLoaderResult.Stats.DefineClassHits -gt 0) {
+        $score *= 1.25
+        $reasons += 'RemoteDefineClassLoaderMultiplier'
     }
     if ($NativeResult.Payloads.Count -gt 0 -and ($AsmResult.Stats.NativeLoads -gt 0 -or $ReflectionResult.Score -gt 0)) {
         $score *= 1.25
@@ -1580,6 +1681,7 @@ foreach ($jar in $jarFiles) {
         $asmResult = Analyze-ASMBytecodeScan $extractPath
         $mixinResult = Analyze-MixinInjection $extractPath
         $reflectionResult = Analyze-ReflectionDetection $extractPath
+        $packedLoaderResult = Analyze-PackedLoaderDetection $extractPath
         $nativeResult = Analyze-NativePayloadExtraction -FilePath $jar.FullName -tempDir $tempDir
         $sandboxRoot = Join-Path $tempDir 'sandbox'
         New-Item -ItemType Directory -Path $sandboxRoot -Force | Out-Null
@@ -1603,6 +1705,11 @@ foreach ($jar in $jarFiles) {
         foreach ($key in $nestedResult.Findings.Keys) {
             if (-not $allFindings.ContainsKey($key)) {
                 $allFindings[$key] = $nestedResult.Findings[$key]
+            }
+        }
+        foreach ($key in $packedLoaderResult.Findings.Keys) {
+            if (-not $allFindings.ContainsKey($key)) {
+                $allFindings[$key] = $packedLoaderResult.Findings[$key]
             }
         }
 
@@ -1633,6 +1740,7 @@ foreach ($jar in $jarFiles) {
             -AsmResult $asmResult `
             -MixinResult $mixinResult `
             -ReflectionResult $reflectionResult `
+            -PackedLoaderResult $packedLoaderResult `
             -NativeResult $nativeResult `
             -SandboxResult $sandboxResult
 
@@ -1655,6 +1763,7 @@ foreach ($jar in $jarFiles) {
             ASMFlags = ($asmResult.Flags -join ', ')
             MixinFlags = ($mixinResult.Flags -join ', ')
             ReflectionFlags = ($reflectionResult.Flags -join ', ')
+            PackedLoaderFlags = ($packedLoaderResult.Flags -join ', ')
             NativeFlags = ($nativeResult.Flags -join ', ')
             SandboxFlags = ($sandboxResult.Flags -join ', ')
             ThreatProbability = $heuristic.ThreatProbability
@@ -1665,7 +1774,11 @@ foreach ($jar in $jarFiles) {
         # Categorize mod
         if (
     $totalScore -ge 35 -or
-    $bypassResult.Score -ge 15
+    $bypassResult.Score -ge 15 -or
+    $packedLoaderResult.Score -ge 35 -or
+    $packedLoaderResult.Findings.ContainsKey('ReflectiveClassLoaderEntrypoint') -or
+    $packedLoaderResult.Findings.ContainsKey('EmbeddedClassMapLoader') -or
+    $packedLoaderResult.Findings.ContainsKey('RawSocketPayloadLoader')
 ) {
             $criticalMods += [PSCustomObject]@{
                 FileName = $jar.Name
@@ -1673,6 +1786,7 @@ foreach ($jar in $jarFiles) {
                 Score = $totalScore
                 Obfuscated = $isObfuscated
                 BypassFlags = $bypassResult.Flags -join ', '
+                PackedLoaderFlags = $packedLoaderResult.Flags -join ', '
                 ObfuscationFlags = $obfResult.Flags -join ', '
                 Fullwidth = ($FoundFullwidth | Select-Object -First 5) -join ', '
                 SuspiciousURLs = ($FoundURLs | Select-Object -First 3) -join ', '
@@ -1686,6 +1800,7 @@ foreach ($jar in $jarFiles) {
                 Score = $totalScore
                 Obfuscated = $isObfuscated
                 ObfuscationFlags = $obfResult.Flags -join ', '
+                PackedLoaderFlags = $packedLoaderResult.Flags -join ', '
                 Fullwidth = ($FoundFullwidth | Select-Object -First 3) -join ', '
                 Features = $combinedFeatures
             }
@@ -1699,6 +1814,7 @@ foreach ($jar in $jarFiles) {
                 ASMFlags = $asmResult.Flags -join ', '
                 MixinFlags = $mixinResult.Flags -join ', '
                 ReflectionFlags = $reflectionResult.Flags -join ', '
+                PackedLoaderFlags = $packedLoaderResult.Flags -join ', '
                 NativeFlags = $nativeResult.Flags -join ', '
                 SandboxFlags = $sandboxResult.Flags -join ', '
                 ThreatProbability = $heuristic.ThreatProbability
