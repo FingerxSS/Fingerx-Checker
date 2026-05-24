@@ -33,6 +33,8 @@ $Config = @{
     EntropyThreshold = 7.2
     MinClassCountForStats = 5
     ConcurrentLimit = 4
+    EnableRuntimeSandbox = $false  # Real execution is dangerous; keep false unless using an isolated VM
+    SandboxTimeoutSec = 8
 }
 
 # ==================== CORE UTILITIES ====================
@@ -1012,6 +1014,463 @@ function Get-ZoneIdentifier {
     return $null
 }
 
+
+
+# ==================== ADVANCED ANALYSIS MODULES v3 ====================
+
+function Convert-BytesToAsciiText {
+    param([byte[]]$Bytes)
+    if (-not $Bytes) { return '' }
+    return [System.Text.Encoding]::Latin1.GetString($Bytes)
+}
+
+function Extract-AsciiStrings {
+    param(
+        [byte[]]$Bytes,
+        [int]$MinLength = 4
+    )
+    $text = Convert-BytesToAsciiText $Bytes
+    $pattern = "[\x20-\x7E]{$MinLength,}"
+    return [regex]::Matches($text, $pattern) | ForEach-Object { $_.Value }
+}
+
+function Analyze-ASMBytecodeScan {
+    param([string]$extractPath)
+
+    # NOTE: This is a PowerShell-native bytecode scan, not a full ASM library parser.
+    # It reads class constant-pool text and raw opcode bytes to find bytecode-level indicators.
+    $flags = @()
+    $score = 0
+    $stats = @{
+        ClassFiles = 0
+        InvokeDynamic = 0
+        RuntimeExec = 0
+        ProcessBuilder = 0
+        NetworkCalls = 0
+        PacketClasses = 0
+        RotationMath = 0
+        RenderHooks = 0
+        NativeLoads = 0
+        ClassLoaders = 0
+        SuspiciousOpcodeDensity = 0.0
+    }
+
+    $classes = Get-ChildItem -Path $extractPath -Recurse -Filter *.class -ErrorAction SilentlyContinue
+    $stats.ClassFiles = $classes.Count
+
+    foreach ($class in $classes) {
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($class.FullName)
+            if ($bytes.Length -gt $Config.MaxFileSize) { continue }
+            $text = Convert-BytesToAsciiText $bytes
+
+            # Raw JVM opcode approximation. 0xBA = invokedynamic, 0xB8 = invokestatic, 0xB6 = invokevirtual.
+            $invokeDynamicCount = 0
+            $invokeStaticCount = 0
+            $invokeVirtualCount = 0
+            foreach ($b in $bytes) {
+                if ($b -eq 0xBA) { $invokeDynamicCount++ }
+                elseif ($b -eq 0xB8) { $invokeStaticCount++ }
+                elseif ($b -eq 0xB6) { $invokeVirtualCount++ }
+            }
+
+            if ($invokeDynamicCount -gt 0) {
+                $stats.InvokeDynamic += $invokeDynamicCount
+            }
+
+            if ($text -match 'java/lang/Runtime' -and $text -match 'getRuntime' -and $text -match 'exec') {
+                $stats.RuntimeExec++
+            }
+            if ($text -match 'java/lang/ProcessBuilder') {
+                $stats.ProcessBuilder++
+            }
+            if ($text -match 'java/net/(URL|Socket|URI|HttpURLConnection)|okhttp3/|org/apache/http|java/net/http') {
+                $stats.NetworkCalls++
+            }
+            if ($text -match 'ClientConnection|PacketByteBuf|sendPacket|ClientPlayNetworkHandler|Serverbound|Clientbound|net/minecraft/network') {
+                $stats.PacketClasses++
+            }
+            if ($text -match 'yaw|pitch|rotationYaw|rotationPitch|MathHelper|atan2|wrapDegrees|RayTrace|HitResult|crosshairTarget') {
+                $stats.RotationMath++
+            }
+            if ($text -match 'GameRenderer|WorldRenderer|VertexConsumer|MatrixStack|RenderSystem|glfw|imgui') {
+                $stats.RenderHooks++
+            }
+            if ($text -match 'System/loadLibrary|System/load|java/lang/System') {
+                if ($text -match 'loadLibrary|\bload\b') { $stats.NativeLoads++ }
+            }
+            if ($text -match 'URLClassLoader|ClassLoader|defineClass|Instrumentation|AttachProvider') {
+                $stats.ClassLoaders++
+            }
+
+            $density = 0.0
+            if ($bytes.Length -gt 0) {
+                $density = [math]::Round((($invokeDynamicCount + $invokeStaticCount + $invokeVirtualCount) / $bytes.Length) * 1000, 4)
+            }
+            if ($density -gt $stats.SuspiciousOpcodeDensity) {
+                $stats.SuspiciousOpcodeDensity = $density
+            }
+        }
+        catch {}
+    }
+
+    if ($stats.InvokeDynamic -ge 5) { $flags += "InvokeDynamic:$($stats.InvokeDynamic)"; $score += 8 }
+    elseif ($stats.InvokeDynamic -gt 0) { $flags += "InvokeDynamic:$($stats.InvokeDynamic)"; $score += 3 }
+    if ($stats.RuntimeExec -gt 0) { $flags += "RuntimeExecClass:$($stats.RuntimeExec)"; $score += 18 }
+    if ($stats.ProcessBuilder -gt 0) { $flags += "ProcessBuilderClass:$($stats.ProcessBuilder)"; $score += 18 }
+    if ($stats.NetworkCalls -ge 3) { $flags += "NetworkHeavy:$($stats.NetworkCalls)"; $score += 10 }
+    elseif ($stats.NetworkCalls -gt 0) { $flags += "NetworkCalls:$($stats.NetworkCalls)"; $score += 4 }
+    if ($stats.PacketClasses -ge 4 -and $stats.RotationMath -ge 2) { $flags += 'PacketRotationCorrelation'; $score += 14 }
+    elseif ($stats.PacketClasses -ge 4) { $flags += "PacketHeavy:$($stats.PacketClasses)"; $score += 6 }
+    if ($stats.RenderHooks -ge 5 -and $stats.PacketClasses -ge 2) { $flags += 'RenderPacketCorrelation'; $score += 8 }
+    if ($stats.NativeLoads -gt 0) { $flags += "NativeLoadCalls:$($stats.NativeLoads)"; $score += 8 }
+    if ($stats.ClassLoaders -gt 0) { $flags += "DynamicClassLoading:$($stats.ClassLoaders)"; $score += 10 }
+
+    return @{ Flags = $flags; Score = $score; Stats = $stats }
+}
+
+function Analyze-MixinInjection {
+    param([string]$extractPath)
+
+    $flags = @()
+    $score = 0
+    $stats = @{
+        ConfigFiles = 0
+        MixinClasses = 0
+        CriticalTargets = 0
+        CancellableHooks = 0
+        RedirectHooks = 0
+        ModifyVariableHooks = 0
+        PacketTargets = 0
+        RotationTargets = 0
+    }
+
+    $criticalTargetPatterns = @(
+        'ClientPlayerEntity', 'LocalPlayer', 'MinecraftClient', 'Minecraft',
+        'GameRenderer', 'Mouse', 'Keyboard', 'ClientConnection',
+        'ClientPlayerInteractionManager', 'MultiPlayerGameMode', 'PlayerController',
+        'ClientPlayNetworkHandler', 'LivingEntity', 'PlayerEntity', 'Entity',
+        'WorldRenderer', 'HandledScreen', 'InventoryScreen'
+    )
+
+    $jsonFiles = Get-ChildItem -Path $extractPath -Recurse -Include '*mixin*.json','mixins.*.json','*.mixins.json' -ErrorAction SilentlyContinue
+    foreach ($json in $jsonFiles) {
+        try {
+            $stats.ConfigFiles++
+            $raw = Get-Content $json.FullName -Raw -Encoding UTF8
+            $parsed = $null
+            try { $parsed = $raw | ConvertFrom-Json -ErrorAction Stop } catch {}
+
+            $mixinNames = @()
+            if ($parsed) {
+                foreach ($prop in @('mixins','client','server')) {
+                    if ($parsed.PSObject.Properties.Name -contains $prop -and $parsed.$prop) {
+                        $mixinNames += @($parsed.$prop)
+                    }
+                }
+            }
+            else {
+                $mixinNames += ([regex]::Matches($raw, '"([A-Za-z0-9_.$/-]+)"') | ForEach-Object { $_.Groups[1].Value })
+            }
+
+            $stats.MixinClasses += $mixinNames.Count
+            foreach ($name in $mixinNames) {
+                foreach ($target in $criticalTargetPatterns) {
+                    if ($name -match [regex]::Escape($target)) {
+                        $stats.CriticalTargets++
+                        if ($target -match 'Connection|Network|Packet') { $stats.PacketTargets++ }
+                        if ($target -match 'Player|Entity|Mouse|GameRenderer') { $stats.RotationTargets++ }
+                    }
+                }
+            }
+        }
+        catch {}
+    }
+
+    # Scan class files for Mixin annotations and injection metadata.
+    $classes = Get-ChildItem -Path $extractPath -Recurse -Filter *.class -ErrorAction SilentlyContinue
+    foreach ($class in $classes) {
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($class.FullName)
+            if ($bytes.Length -gt $Config.MaxFileSize) { continue }
+            $text = Convert-BytesToAsciiText $bytes
+
+            if ($text -match 'org/spongepowered/asm/mixin/Mixin|Lorg/spongepowered/asm/mixin/Mixin') {
+                foreach ($target in $criticalTargetPatterns) {
+                    if ($text -match [regex]::Escape($target)) {
+                        $stats.CriticalTargets++
+                        if ($target -match 'Connection|Network|Packet') { $stats.PacketTargets++ }
+                        if ($target -match 'Player|Entity|Mouse|GameRenderer') { $stats.RotationTargets++ }
+                    }
+                }
+            }
+            if ($text -match 'org/spongepowered/asm/mixin/injection/Inject|CallbackInfo|CallbackInfoReturnable') {
+                if ($text -match 'cancellable') { $stats.CancellableHooks++ }
+            }
+            if ($text -match 'org/spongepowered/asm/mixin/injection/Redirect|@Redirect') {
+                $stats.RedirectHooks++
+            }
+            if ($text -match 'ModifyVariable|ModifyArg|ModifyArgs|ModifyConstant') {
+                $stats.ModifyVariableHooks++
+            }
+        }
+        catch {}
+    }
+
+    if ($stats.ConfigFiles -gt 0) { $flags += "MixinConfigs:$($stats.ConfigFiles)"; $score += 2 }
+    if ($stats.CriticalTargets -ge 5) { $flags += "CriticalMixinTargets:$($stats.CriticalTargets)"; $score += 14 }
+    elseif ($stats.CriticalTargets -gt 0) { $flags += "CriticalMixinTargets:$($stats.CriticalTargets)"; $score += 6 }
+    if ($stats.CancellableHooks -gt 0) { $flags += "CancellableInjects:$($stats.CancellableHooks)"; $score += 8 }
+    if ($stats.RedirectHooks -gt 0) { $flags += "RedirectHooks:$($stats.RedirectHooks)"; $score += 9 }
+    if ($stats.ModifyVariableHooks -gt 0) { $flags += "ModifyHooks:$($stats.ModifyVariableHooks)"; $score += 7 }
+    if ($stats.PacketTargets -gt 0 -and $stats.RotationTargets -gt 0) { $flags += 'PacketRotationMixinCorrelation'; $score += 12 }
+
+    return @{ Flags = $flags; Score = $score; Stats = $stats }
+}
+
+function Analyze-ReflectionDetection {
+    param([string]$extractPath)
+
+    $flags = @()
+    $score = 0
+    $stats = @{
+        ReflectionClasses = 0
+        SetAccessible = 0
+        Unsafe = 0
+        MethodHandles = 0
+        DefineClass = 0
+        ClassForName = 0
+        HiddenAccessors = 0
+    }
+
+    $classes = Get-ChildItem -Path $extractPath -Recurse -Filter *.class -ErrorAction SilentlyContinue
+    foreach ($class in $classes) {
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($class.FullName)
+            if ($bytes.Length -gt $Config.MaxFileSize) { continue }
+            $text = Convert-BytesToAsciiText $bytes
+            $hit = $false
+
+            if ($text -match 'java/lang/reflect|reflect/Field|reflect/Method|reflect/Constructor') { $stats.ReflectionClasses++; $hit = $true }
+            if ($text -match 'setAccessible') { $stats.SetAccessible++; $hit = $true }
+            if ($text -match 'sun/misc/Unsafe|jdk/internal/misc/Unsafe|Unsafe') { $stats.Unsafe++; $hit = $true }
+            if ($text -match 'java/lang/invoke/MethodHandles|Lookup|findVirtual|findStatic|unreflect') { $stats.MethodHandles++; $hit = $true }
+            if ($text -match 'defineClass|defineHiddenClass') { $stats.DefineClass++; $hit = $true }
+            if ($text -match 'Class/forName|forName') { $stats.ClassForName++; $hit = $true }
+            if ($text -match 'Accessor|Invoker|MixinAccessor|ClientPlayerInteractionManagerAccessor') { $stats.HiddenAccessors++; $hit = $true }
+        }
+        catch {}
+    }
+
+    if ($stats.ReflectionClasses -gt 0) { $flags += "ReflectionClasses:$($stats.ReflectionClasses)"; $score += 5 }
+    if ($stats.SetAccessible -gt 0) { $flags += "SetAccessible:$($stats.SetAccessible)"; $score += 8 }
+    if ($stats.Unsafe -gt 0) { $flags += "UnsafeUsage:$($stats.Unsafe)"; $score += 12 }
+    if ($stats.MethodHandles -gt 0) { $flags += "MethodHandles:$($stats.MethodHandles)"; $score += 7 }
+    if ($stats.DefineClass -gt 0) { $flags += "DefineClass:$($stats.DefineClass)"; $score += 14 }
+    if ($stats.ClassForName -gt 2) { $flags += "ClassForName:$($stats.ClassForName)"; $score += 6 }
+    if ($stats.HiddenAccessors -gt 0) { $flags += "HiddenAccessors:$($stats.HiddenAccessors)"; $score += 5 }
+
+    if (($stats.SetAccessible + $stats.Unsafe + $stats.DefineClass) -gt 0 -and $stats.ClassForName -gt 0) {
+        $flags += 'ReflectionBypassCorrelation'
+        $score += 10
+    }
+
+    return @{ Flags = $flags; Score = $score; Stats = $stats }
+}
+
+function Analyze-NativePayloadExtraction {
+    param(
+        [string]$FilePath,
+        [string]$tempDir
+    )
+
+    $flags = @()
+    $score = 0
+    $payloads = @()
+    $nativeExt = '\.(dll|so|dylib|exe|sys)$'
+
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($FilePath)
+        foreach ($entry in $zip.Entries) {
+            if ($entry.FullName -match $nativeExt) {
+                $name = [System.IO.Path]::GetFileName($entry.FullName)
+                $outPath = Join-Path $tempDir ("native_" + [Guid]::NewGuid().ToString('N') + "_" + $name)
+                try {
+                    $entry.ExtractToFile($outPath, $true)
+                    $hash = Get-SHA1 $outPath
+                    $bytes = [System.IO.File]::ReadAllBytes($outPath)
+                    $text = Convert-BytesToAsciiText $bytes
+                    $imports = @()
+
+                    $dangerousNative = @(
+                        'CreateRemoteThread','VirtualAlloc','VirtualProtect','WriteProcessMemory','ReadProcessMemory',
+                        'OpenProcess','LoadLibrary','GetProcAddress','SetWindowsHookEx','GetAsyncKeyState',
+                        'NtQueryInformationProcess','IsDebuggerPresent','CheckRemoteDebuggerPresent',
+                        'WinHttpOpen','InternetOpen','URLDownloadToFile','CryptUnprotectData'
+                    )
+                    foreach ($imp in $dangerousNative) {
+                        if ($text -match [regex]::Escape($imp)) { $imports += $imp }
+                    }
+
+                    $payloadScore = 10
+                    if ($name -match '\.sys$') { $payloadScore += 20 }
+                    if ($imports.Count -gt 0) { $payloadScore += [Math]::Min(25, $imports.Count * 5) }
+                    if ($entry.FullName -match 'natives|native|jni|loader|agent') { $payloadScore += 5 }
+
+                    $payloads += [PSCustomObject]@{
+                        Name = $name
+                        Path = $entry.FullName
+                        Size = $entry.Length
+                        SHA1 = $hash
+                        Imports = ($imports -join ', ')
+                        Score = $payloadScore
+                    }
+                    $score += $payloadScore
+                }
+                catch {}
+                finally {
+                    Remove-Item $outPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        $zip.Dispose()
+    }
+    catch {}
+
+    if ($payloads.Count -gt 0) {
+        $flags += "NativePayloads:$($payloads.Count)"
+        foreach ($p in $payloads) {
+            if ($p.Imports) { $flags += "NativeDangerImports:$($p.Name)" }
+            if ($p.Name -match '\.sys$') { $flags += "KernelDriver:$($p.Name)" }
+        }
+    }
+
+    return @{ Flags = $flags; Score = $score; Payloads = $payloads }
+}
+
+function Invoke-DynamicRuntimeSandbox {
+    param(
+        [string]$FilePath,
+        [string]$SandboxRoot,
+        [int]$TimeoutSec = 8,
+        [switch]$ActuallyRun
+    )
+
+    # Default mode is safe dry-run. Real execution of unknown mods is dangerous and only starts with -ActuallyRun.
+    $flags = @()
+    $score = 0
+    $events = @()
+
+    try {
+        $beforeFiles = @{}
+        if (Test-Path $SandboxRoot) {
+            Get-ChildItem $SandboxRoot -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $beforeFiles[$_.FullName] = $_.Length }
+        }
+
+        if (-not $ActuallyRun) {
+            $flags += 'SandboxDryRunOnly'
+            $events += 'Dynamic execution skipped; static runtime indicators only.'
+            return @{ Flags = $flags; Score = $score; Events = $events }
+        }
+
+        $java = Get-Command java -ErrorAction SilentlyContinue
+        if (-not $java) {
+            $flags += 'JavaNotFound'
+            return @{ Flags = $flags; Score = $score; Events = $events }
+        }
+
+        $workDir = Join-Path $SandboxRoot ('run_' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $java.Source
+        $psi.Arguments = "-Djava.io.tmpdir=`"$workDir`" -jar `"$FilePath`""
+        $psi.WorkingDirectory = $workDir
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if (-not $proc.WaitFor($TimeoutSec * 1000)) {
+            try { $proc.Kill() } catch {}
+            $flags += 'RuntimeTimeout'
+            $score += 5
+        }
+
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        if ($stdout -match 'Exception|Error|ClassNotFound|NoClassDef') { $events += 'Runtime output contains Java errors.' }
+        if ($stderr -match 'Exception|Error|ClassNotFound|NoClassDef') { $events += 'Runtime error stream contains Java errors.' }
+
+        $after = Get-ChildItem $workDir -Recurse -File -ErrorAction SilentlyContinue
+        if ($after.Count -gt 0) {
+            $flags += "RuntimeCreatedFiles:$($after.Count)"
+            $score += [Math]::Min(15, $after.Count * 2)
+        }
+    }
+    catch {
+        $flags += 'SandboxError'
+        $events += $_.Exception.Message
+    }
+
+    return @{ Flags = $flags; Score = $score; Events = $events }
+}
+
+function Calculate-ProperHeuristicScore {
+    param(
+        [int]$BaseScore,
+        [hashtable]$ClassFeatures,
+        [hashtable]$BypassResult,
+        [hashtable]$ObfuscationResult,
+        [hashtable]$AsmResult,
+        [hashtable]$MixinResult,
+        [hashtable]$ReflectionResult,
+        [hashtable]$NativeResult,
+        [hashtable]$SandboxResult
+    )
+
+    $score = [double]$BaseScore
+    $reasons = @()
+
+    $score += $AsmResult.Score
+    $score += $MixinResult.Score
+    $score += $ReflectionResult.Score
+    $score += $NativeResult.Score
+    $score += $SandboxResult.Score
+
+    if ($ClassFeatures.HighEntropy -and ($ReflectionResult.Score -gt 0 -or $AsmResult.Stats.InvokeDynamic -gt 0)) {
+        $score *= 1.18
+        $reasons += 'HighEntropy+DynamicCodeMultiplier'
+    }
+    if ($MixinResult.Stats.PacketTargets -gt 0 -and $MixinResult.Stats.RotationTargets -gt 0) {
+        $score *= 1.15
+        $reasons += 'Packet+RotationMixinMultiplier'
+    }
+    if ($ReflectionResult.Stats.DefineClass -gt 0 -and $ClassFeatures.Base64Strings -gt 0) {
+        $score *= 1.20
+        $reasons += 'Base64+DefineClassMultiplier'
+    }
+    if ($NativeResult.Payloads.Count -gt 0 -and ($AsmResult.Stats.NativeLoads -gt 0 -or $ReflectionResult.Score -gt 0)) {
+        $score *= 1.25
+        $reasons += 'NativePayloadCorrelationMultiplier'
+    }
+    if ($BypassResult.Score -ge 15) {
+        $score *= 1.10
+        $reasons += 'BypassMultiplier'
+    }
+
+    # Avoid infinite runaway scores, while preserving clear critical status.
+    $final = [math]::Round([Math]::Min(150, $score), 0)
+    $probability = [math]::Round((1 / (1 + [Math]::Exp(-(($final - 25) / 10)))), 3)
+
+    return @{
+        Score = [int]$final
+        ThreatProbability = $probability
+        Reasons = $reasons
+    }
+}
+
 # ==================== MAIN ANALYSIS ====================
 
 $verifiedMods = @()
@@ -1118,6 +1577,18 @@ foreach ($jar in $jarFiles) {
         $nestedResult = Analyze-NestedJars $extractPath $tempDir
         $bypassResult = Analyze-BypassTechniques $jar.FullName
         $obfResult = Analyze-ObfuscationLevel $jar.FullName
+        $asmResult = Analyze-ASMBytecodeScan $extractPath
+        $mixinResult = Analyze-MixinInjection $extractPath
+        $reflectionResult = Analyze-ReflectionDetection $extractPath
+        $nativeResult = Analyze-NativePayloadExtraction -FilePath $jar.FullName -tempDir $tempDir
+        $sandboxRoot = Join-Path $tempDir 'sandbox'
+        New-Item -ItemType Directory -Path $sandboxRoot -Force | Out-Null
+        if ($Config.EnableRuntimeSandbox) {
+            $sandboxResult = Invoke-DynamicRuntimeSandbox -FilePath $jar.FullName -SandboxRoot $sandboxRoot -TimeoutSec $Config.SandboxTimeoutSec -ActuallyRun
+        }
+        else {
+            $sandboxResult = Invoke-DynamicRuntimeSandbox -FilePath $jar.FullName -SandboxRoot $sandboxRoot -TimeoutSec $Config.SandboxTimeoutSec
+        }
 
         # Merge findings
         $allFindings = @{}
@@ -1135,24 +1606,37 @@ foreach ($jar in $jarFiles) {
             }
         }
 
-        # Calculate total score
-        $totalScore = $classResult.Score + $metaResult.Score + $nestedResult.Score + 
-                      $bypassResult.Score + $obfResult.Score
+        # Calculate base score
+        $baseScore = $classResult.Score + $metaResult.Score + $nestedResult.Score + 
+                     $bypassResult.Score + $obfResult.Score
 
         $isObfuscated = $classResult.Obfuscated -or $nestedResult.Obfuscated
 
         # Advanced scoring bonuses
         if ($allFindings.ContainsKey('EmbeddedBase64') -and $isObfuscated) {
-            $totalScore += 6
+            $baseScore += 6
         }
 
-        if ($isObfuscated -and $totalScore -ge 5) {
-            $totalScore += 5
+        if ($isObfuscated -and $baseScore -ge 5) {
+            $baseScore += 5
         }
 
         if ($classResult.Features.KnownCheatClient) {
-            $totalScore += 10
+            $baseScore += 10
         }
+
+        $heuristic = Calculate-ProperHeuristicScore `
+            -BaseScore $baseScore `
+            -ClassFeatures $classResult.Features `
+            -BypassResult $bypassResult `
+            -ObfuscationResult $obfResult `
+            -AsmResult $asmResult `
+            -MixinResult $mixinResult `
+            -ReflectionResult $reflectionResult `
+            -NativeResult $nativeResult `
+            -SandboxResult $sandboxResult
+
+        $totalScore = $heuristic.Score
 
         # Combine features
         $combinedFeatures = @{
@@ -1168,6 +1652,13 @@ foreach ($jar in $jarFiles) {
             JapaneseChars = $classResult.Features.JapaneseChars
             KnownCheatClient = $classResult.Features.KnownCheatClient
             CheatObfuscator = $classResult.Features.CheatObfuscator
+            ASMFlags = ($asmResult.Flags -join ', ')
+            MixinFlags = ($mixinResult.Flags -join ', ')
+            ReflectionFlags = ($reflectionResult.Flags -join ', ')
+            NativeFlags = ($nativeResult.Flags -join ', ')
+            SandboxFlags = ($sandboxResult.Flags -join ', ')
+            ThreatProbability = $heuristic.ThreatProbability
+            HeuristicReasons = ($heuristic.Reasons -join ', ')
             TotalScore = $totalScore
         }
 
@@ -1205,6 +1696,12 @@ foreach ($jar in $jarFiles) {
                 Detections = ($allFindings.Keys | Sort-Object { $allFindings[$_] } -Descending | Select-Object -First 5) -join ', '
                 Score = $totalScore
                 Obfuscated = $isObfuscated
+                ASMFlags = $asmResult.Flags -join ', '
+                MixinFlags = $mixinResult.Flags -join ', '
+                ReflectionFlags = $reflectionResult.Flags -join ', '
+                NativeFlags = $nativeResult.Flags -join ', '
+                SandboxFlags = $sandboxResult.Flags -join ', '
+                ThreatProbability = $heuristic.ThreatProbability
                 Features = $combinedFeatures
             }
         }
@@ -1291,6 +1788,12 @@ if ($suspiciousMods.Count -gt 0) {
         if ($mod.Fullwidth) {
             Write-Host "    [!] Fullwidth Unicode: $($mod.Fullwidth)" -ForegroundColor Cyan
         }
+        Write-Host "    Threat Probability: $($mod.ThreatProbability)" -ForegroundColor DarkYellow
+        if ($mod.ASMFlags) { Write-Host "    ASM/Bytecode: $($mod.ASMFlags)" -ForegroundColor DarkYellow }
+        if ($mod.MixinFlags) { Write-Host "    Mixin: $($mod.MixinFlags)" -ForegroundColor DarkYellow }
+        if ($mod.ReflectionFlags) { Write-Host "    Reflection: $($mod.ReflectionFlags)" -ForegroundColor DarkYellow }
+        if ($mod.NativeFlags) { Write-Host "    Native: $($mod.NativeFlags)" -ForegroundColor Red }
+        if ($mod.SandboxFlags) { Write-Host "    Sandbox: $($mod.SandboxFlags)" -ForegroundColor Gray }
 
         Write-Host ""
     }
@@ -1324,6 +1827,12 @@ if ($highRiskMods.Count -gt 0) {
         if ($mod.SuspiciousURLs) {
             Write-Host "    [!] Suspicious URLs: $($mod.SuspiciousURLs)" -ForegroundColor Red
         }
+        Write-Host "    Threat Probability: $($mod.ThreatProbability)" -ForegroundColor Magenta
+        if ($mod.ASMFlags) { Write-Host "    ASM/Bytecode: $($mod.ASMFlags)" -ForegroundColor Magenta }
+        if ($mod.MixinFlags) { Write-Host "    Mixin: $($mod.MixinFlags)" -ForegroundColor Magenta }
+        if ($mod.ReflectionFlags) { Write-Host "    Reflection: $($mod.ReflectionFlags)" -ForegroundColor Magenta }
+        if ($mod.NativeFlags) { Write-Host "    Native: $($mod.NativeFlags)" -ForegroundColor Red }
+        if ($mod.SandboxFlags) { Write-Host "    Sandbox: $($mod.SandboxFlags)" -ForegroundColor Gray }
 
         Write-Host ""
     }
@@ -1362,6 +1871,12 @@ if ($criticalMods.Count -gt 0) {
         if ($mod.SuspiciousURLs) {
             Write-Host "    [!!!] Suspicious URLs: $($mod.SuspiciousURLs)" -ForegroundColor Red -BackgroundColor Yellow
         }
+        Write-Host "    Threat Probability: $($mod.ThreatProbability)" -ForegroundColor Magenta
+        if ($mod.ASMFlags) { Write-Host "    ASM/Bytecode: $($mod.ASMFlags)" -ForegroundColor Magenta }
+        if ($mod.MixinFlags) { Write-Host "    Mixin: $($mod.MixinFlags)" -ForegroundColor Magenta }
+        if ($mod.ReflectionFlags) { Write-Host "    Reflection: $($mod.ReflectionFlags)" -ForegroundColor Magenta }
+        if ($mod.NativeFlags) { Write-Host "    Native: $($mod.NativeFlags)" -ForegroundColor Red -BackgroundColor Yellow }
+        if ($mod.SandboxFlags) { Write-Host "    Sandbox: $($mod.SandboxFlags)" -ForegroundColor Gray }
 
         Write-Host ""
     }
